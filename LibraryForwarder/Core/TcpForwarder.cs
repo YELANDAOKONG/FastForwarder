@@ -11,20 +11,19 @@ public class TcpForwarder : IDisposable
     public int LocalPort { get; }
     public IPAddress RemoteIp { get; }
     public int RemotePort { get; }
+    
+    public bool IsDisposed = false;
 
     private Socket _localSocket;
-    private List<Socket> _remoteSockets;
     private bool _isWorking;
     private Task? _mainThread;
-    private List<Task> _workingThreads;
-    private readonly object _threadLock = new();
-    
+    private CancellationTokenSource _cancellationTokenSource = new();
     
     private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
     private readonly int _bufferSize;
     
-    private bool _isDisposed = false;
     private ITrafficLogger _trafficLogger;
+    private ILogger _logger;
     
     
     public TcpForwarder(
@@ -33,7 +32,8 @@ public class TcpForwarder : IDisposable
         IPAddress remoteIp,
         int remotePort, 
         ITrafficLogger? trafficLogger = null,
-        int bufferSize = 8192
+        ILogger? logger = null,
+        int bufferSize = 16384
     )
     {
         LocalIp = localIp;
@@ -46,27 +46,37 @@ public class TcpForwarder : IDisposable
         _localSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
         _localSocket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
         _localSocket.Bind(new IPEndPoint(LocalIp, LocalPort));
-        _remoteSockets = new List<Socket>();
 
         _isWorking = false;
         _mainThread = null;
-        _workingThreads = new List<Task>();
         
         _trafficLogger = trafficLogger ?? new SimpleTrafficLogger();
+        _logger = logger ?? new SimpleLogger();
         _bufferSize = bufferSize;
     }
 
-    public void Start()
+    public async void Start()
     {
-        if (_isWorking)
+        try
         {
-            return;
-        }
-        lock (_threadLock)
-        {
-            _localSocket.Listen(100);
-            _mainThread = Task.Run(MainThread);
+            if (_isWorking)
+            {
+                return;
+            }
             _isWorking = true;
+            _cancellationTokenSource = new CancellationTokenSource();
+            _localSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            _localSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _localSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            _localSocket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+            _localSocket.Bind(new IPEndPoint(LocalIp, LocalPort));
+            _localSocket.Listen();
+            _mainThread = Task.Run(MainThread);
+            await _mainThread;
+        }
+        catch (Exception e)
+        {
+            _logger.Error($"<Root> => ERROR START SERVICES: {e.Message}");
         }
     }
 
@@ -78,35 +88,37 @@ public class TcpForwarder : IDisposable
         }
     }
 
-    private void Stop()
+    private async void Stop()
     {
-        lock (_threadLock)
+        try
         {
-            _isWorking = false;
-            _mainThread?.Dispose();
-            foreach (var workingThread in _workingThreads)
+            if (!_isWorking)
             {
-                workingThread.Dispose();
+                return;
             }
+            _isWorking = false;
+            await _cancellationTokenSource.CancelAsync();
+            _localSocket?.Dispose();
+        }
+        catch (Exception e)
+        {
+            _logger.Error($"<Root> => ERROR STOP SERVICES: {e.Message}");
         }
     }
     
-    public void Dispose()
+    public async void Dispose()
     {
-        _isDisposed = true;
-        Stop();
-        _localSocket.Dispose();
-        _remoteSockets.ForEach(
-            socket =>
-            {
-                socket.Dispose();
-            }
-        );
-    }
-    
-    public bool IsDisposed()
-    {
-        return _isDisposed;
+        try
+        {
+            IsDisposed = true;
+            await _cancellationTokenSource.CancelAsync();
+            _isWorking = false;
+            _localSocket.Dispose();
+        }
+        catch (Exception e)
+        {
+            _logger.Error($"<Root> => ERROR DISPOSE SERVICES: {e.Message}");
+        }
     }
     
     public ITrafficLogger GetTrafficLogger()
@@ -114,115 +126,125 @@ public class TcpForwarder : IDisposable
         return _trafficLogger;
     }
 
-    private void MainThread()
+    private async void MainThread()
     {
-        while (_isWorking)
+        try
         {
-            try
+            _logger.Info($"<Main> => Server started on {LocalIp}:{LocalPort}");
+            while (_isWorking && !_cancellationTokenSource.IsCancellationRequested)
             {
-                var localSocket = _localSocket.Accept();
-                lock (_threadLock)
+                try
                 {
-                    _remoteSockets.Add(localSocket);
-                    _workingThreads.Add(Task.Run(() => WorkingThread(localSocket)));
+                    var localSocket = await _localSocket.AcceptAsync();
+                    WorkingThread(localSocket);
+                    _logger.Info($"<Main> => Client connected from {((IPEndPoint)localSocket.RemoteEndPoint!).Address}");
                 }
-                Console.WriteLine($"[INFO] ({localSocket.AddressFamily}): New connection from {localSocket.RemoteEndPoint}");
+                catch (Exception e)
+                {
+                    Console.WriteLine(e);
+                }
             }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
-            }
+        }
+        catch (Exception e)
+        {
+            _logger.Error($"<Main> => ERROR MAIN THREAD: {e.Message}");
         }
     }
 
-    private void WorkingThread(Socket localSocket)
+    private async void WorkingThread(Socket localSocket)
     {
         try
         {
             var remoteSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             remoteSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
             remoteSocket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
-            remoteSocket.Connect(RemoteIp, RemotePort);
-            lock (_threadLock)
-            {
-                _remoteSockets.Add(remoteSocket);
-            }
+            await remoteSocket.ConnectAsync(RemoteIp, RemotePort);
 
-            if (_isWorking)
+            if (!_isWorking && !_cancellationTokenSource.IsCancellationRequested) return;
+            int random = Random.Shared.Next();
+            WorkingThreadLocalToRemote(localSocket, remoteSocket, random);
+            WorkingThreadRemoteToLocal(localSocket, remoteSocket, random);
+        }
+        
+        catch (Exception e)
+        {
+            _logger.Error($"<Working> => ERROR WORKING THREAD: {e.Message}");
+        }
+    }
+
+    private async void WorkingThreadLocalToRemote(Socket localSocket, Socket remoteSocket, int random = -1)
+    {
+        byte[] buffer = _bufferPool.Rent(_bufferSize);
+        try
+        {
+            while (_isWorking && !IsDisposed && !_cancellationTokenSource.IsCancellationRequested)
             {
-                int random = Random.Shared.Next();
-                var local2RemoteTask = Task.Run(() => WorkingThreadLocalToRemote(localSocket, remoteSocket, random));
-                var remote2LocalTask = Task.Run(() => WorkingThreadRemoteToLocal(localSocket, remoteSocket, random));
-                
-                lock (_threadLock)
+                int bytesRead = await localSocket.ReceiveAsync(buffer);
+                if (bytesRead == 0) return;
+                if (!localSocket.Connected || !remoteSocket.Connected) return;
+                try
                 {
-                    _workingThreads.Add(local2RemoteTask);
-                    _workingThreads.Add(remote2LocalTask);
+                    remoteSocket.Send(buffer, bytesRead, SocketFlags.None);
                 }
+                catch (SocketException e)
+                {
+                    return;
+                }
+                _trafficLogger.LogAsync(
+                    (IPEndPoint)localSocket.RemoteEndPoint!,
+                    (IPEndPoint)remoteSocket.RemoteEndPoint!,
+                    random,
+                    bytesRead,
+                    true
+                );
             }
         }
         catch (Exception e)
         {
-            Console.WriteLine($"[ERROR] ({localSocket.AddressFamily}): {e.Message}");
-            return;
-        }
-    }
-
-    private void WorkingThreadLocalToRemote(Socket localSocket, Socket remoteSocket, int random = -1)
-    {
-        byte[] buffer = _bufferPool.Rent(_bufferSize);
-        try
-        {
-            while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
-            {
-                int bytesRead = localSocket.Receive(buffer);
-                if (bytesRead > 0)
-                {
-                    remoteSocket.Send(buffer, bytesRead, SocketFlags.None);
-                    _trafficLogger.LogAsync(
-                        (IPEndPoint)localSocket.RemoteEndPoint!,
-                        (IPEndPoint)remoteSocket.RemoteEndPoint!,
-                        random,
-                        bytesRead,
-                        true
-                    );
-                }
-            }
+            _logger.Error($"<Working> => ERROR WORKING DATA THREAD (LOCAL TO REMOTE): {e.Message}");
         }
         finally
         {
+            remoteSocket.Dispose();
             _bufferPool.Return(buffer);
         }
     }
     
-    private void WorkingThreadRemoteToLocal(Socket localSocket, Socket remoteSocket, int random = -1)
+    private async void WorkingThreadRemoteToLocal(Socket localSocket, Socket remoteSocket, int random = -1)
     {
         byte[] buffer = _bufferPool.Rent(_bufferSize);
         try
         {
-            while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
+            while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !IsDisposed)
             {
-                int bytesRead = remoteSocket.Receive(buffer);
-                if (bytesRead > 0)
+                int bytesRead = await remoteSocket.ReceiveAsync(buffer);
+                if (bytesRead == 0) return;
+                if (!localSocket.Connected || !remoteSocket.Connected) return;
+                try
                 {
                     localSocket.Send(buffer, bytesRead, SocketFlags.None);
-                    _trafficLogger.LogAsync(
-                        (IPEndPoint)localSocket.RemoteEndPoint!,
-                        (IPEndPoint)remoteSocket.RemoteEndPoint!,
-                        random,
-                        bytesRead,
-                        false
-                    );
                 }
+                catch (SocketException e)
+                {
+                    return;
+                }
+                _trafficLogger.LogAsync(
+                    (IPEndPoint)localSocket.RemoteEndPoint!,
+                    (IPEndPoint)remoteSocket.RemoteEndPoint!,
+                    random,
+                    bytesRead,
+                    false
+                );
             }
+        }
+        catch (Exception e)
+        {
+            _logger.Error($"<Working> => ERROR WORKING DATA THREAD (REMOTE TO LOCAL): {e.Message}");
         }
         finally
         {
+            localSocket.Dispose();
             _bufferPool.Return(buffer);
         }
     }
-    
-    
-    
-    
 }

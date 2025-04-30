@@ -10,21 +10,41 @@ internal static class Program
     {
         if (args.Length >= 1)
         {
+            bool checksum = true;
+            int threads = 8;
             if (args[0] == "client")
             {
                 TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
+                benchmark.VerifyIntegrity = checksum;
+                benchmark.ParallelConnections = threads;
+                benchmark.BufferSize = 256 * 1024;
                 benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 5000).Wait();
+                return;
+            }
+            if (args[0] == "client-9000")
+            {
+                TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
+                benchmark.VerifyIntegrity = checksum;
+                benchmark.ParallelConnections = threads;
+                benchmark.BufferSize = 256 * 1024;
+                benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 9000).Wait();
                 return;
             }
             if (args[0] == "client-direct")
             {
                 TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
+                benchmark.VerifyIntegrity = checksum;
+                benchmark.ParallelConnections = threads;
+                benchmark.BufferSize = 256 * 1024;
                 benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 8000).Wait();
                 return;
             }
-            if (args[0] == "server")
+            if (args[0] == "server" || args[0] == "server-direct")
             {
                 TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
+                benchmark.VerifyIntegrity = checksum;
+                benchmark.ParallelConnections = threads;
+                benchmark.BufferSize = 256 * 1024;
                 benchmark.RunServerAsync(IPAddress.Parse("127.0.0.1"), 8000).Wait();
                 return;
             }
@@ -47,9 +67,19 @@ internal static class Program
             8000,
             trafficLogger: logger
         );
+        if (args.Length >= 1 && args[0] == "mc")
+        {
+            forwarder = new TcpForwarder(
+                IPAddress.Parse("127.0.0.1"),
+                8000,
+                IPAddress.Parse("103.205.253.87"),
+                34015,
+                trafficLogger: logger
+            );
+        }
         
         forwarder.Start();
-        while (!forwarder.IsDisposed())
+        while (!forwarder.IsDisposed)
         {
             Console.ReadLine();
             logger.TrafficLock.EnterReadLock();

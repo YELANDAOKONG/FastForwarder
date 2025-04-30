@@ -45,6 +45,12 @@ public class CenterServer : IDisposable
                 return;
             }
             _cancellationToken = new CancellationTokenSource();
+            _socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+            _socket.Bind(new IPEndPoint(ServerAddress, ServerPort));
+            _socket.Listen();
             _mainTask = Task.Run(MainThread);
             await _mainTask;
         }
@@ -65,6 +71,7 @@ public class CenterServer : IDisposable
             }
             await _cancellationToken.CancelAsync();
             _isWorking = false;
+            _socket.Close();
             _socket.Dispose();
         }
         catch (Exception e)
@@ -128,7 +135,7 @@ public class CenterServer : IDisposable
 
             byte[] initStatusCode = new byte[4];
             var byteRead = await stream.ReadAsync(initStatusCode, 0, initStatusCode.Length);
-            if (byteRead == 0) { return; }
+            if (byteRead == 0 && !_cancellationToken.IsCancellationRequested) { return; }
             
             while (_isWorking && !_cancellationToken.IsCancellationRequested)
             {
