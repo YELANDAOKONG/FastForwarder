@@ -57,7 +57,7 @@ public class CenterServer : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Root> => ERROR START SERVICES: {e.Message}");
-            _logger.Trace($"<Root> => ERROR START SERVICES: {e.StackTrace}");
+            _logger.Trace($"<Root> => ERROR START SERVICES: \n{e.StackTrace}");
         }
     }
 
@@ -77,7 +77,7 @@ public class CenterServer : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Root> => ERROR STOP SERVICES: {e.Message}");
-            _logger.Trace($"<Root> => ERROR STOP SERVICES: {e.StackTrace}");
+            _logger.Trace($"<Root> => ERROR STOP SERVICES: \n{e.StackTrace}");
         }
     }
     
@@ -93,7 +93,7 @@ public class CenterServer : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Root> => ERROR DISPOSE SERVICES: {e.Message}");
-            _logger.Trace($"<Root> => ERROR DISPOSE SERVICES: {e.StackTrace}");
+            _logger.Trace($"<Root> => ERROR DISPOSE SERVICES: \n{e.StackTrace}");
         }
     }
 
@@ -122,7 +122,7 @@ public class CenterServer : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Main> => ERROR MAIN THREAD: {e.Message}");
-            _logger.Trace($"<Main> => ERROR MAIN THREAD: {e.StackTrace}");
+            _logger.Trace($"<Main> => ERROR MAIN THREAD: \n{e.StackTrace}");
         }
     }
 
@@ -148,7 +148,7 @@ public class CenterServer : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Working> => ERROR WORKING THREAD: {e.Message}");
-            _logger.Trace($"<Working> => ERROR WORKING THREAD: {e.StackTrace}");
+            _logger.Trace($"<Working> => ERROR WORKING THREAD: \n{e.StackTrace}");
         }
         finally
         {

@@ -21,6 +21,7 @@ public class TcpForwarder : IDisposable
     
     private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
     private readonly int _bufferSize;
+    private readonly int _remoteConnectTimeout;
     
     private ITrafficLogger _trafficLogger;
     private ILogger _logger;
@@ -33,7 +34,8 @@ public class TcpForwarder : IDisposable
         int remotePort, 
         ITrafficLogger? trafficLogger = null,
         ILogger? logger = null,
-        int bufferSize = 16384
+        int bufferSize = 16384,
+        int remoteConnectTimeout = 10000
     )
     {
         LocalIp = localIp;
@@ -53,6 +55,7 @@ public class TcpForwarder : IDisposable
         _trafficLogger = trafficLogger ?? new SimpleTrafficLogger();
         _logger = logger ?? new SimpleLogger();
         _bufferSize = bufferSize;
+        _remoteConnectTimeout = remoteConnectTimeout;
     }
 
     public async void Start()
@@ -77,6 +80,7 @@ public class TcpForwarder : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Root> => ERROR START SERVICES: {e.Message}");
+            _logger.Trace($"<Root> => ERROR START SERVICES: \n{e.StackTrace}");
         }
     }
 
@@ -103,6 +107,7 @@ public class TcpForwarder : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Root> => ERROR STOP SERVICES: {e.Message}");
+            _logger.Trace($"<Root> => ERROR STOP SERVICES: \n{e.StackTrace}");
         }
     }
     
@@ -118,6 +123,7 @@ public class TcpForwarder : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Root> => ERROR DISPOSE SERVICES: {e.Message}");
+            _logger.Trace($"<Root> => ERROR DISPOSE SERVICES: \n{e.StackTrace}");
         }
     }
     
@@ -136,8 +142,8 @@ public class TcpForwarder : IDisposable
                 try
                 {
                     var localSocket = await _localSocket.AcceptAsync();
-                    WorkingThread(localSocket);
                     _logger.Info($"<Main> => Client connected from {((IPEndPoint)localSocket.RemoteEndPoint!).Address}");
+                    WorkingThread(localSocket);
                 }
                 catch (Exception e)
                 {
@@ -148,6 +154,7 @@ public class TcpForwarder : IDisposable
         catch (Exception e)
         {
             _logger.Error($"<Main> => ERROR MAIN THREAD: {e.Message}");
+            _logger.Trace($"<Main> => ERROR MAIN THREAD: \n{e.StackTrace}");
         }
     }
 
@@ -155,96 +162,190 @@ public class TcpForwarder : IDisposable
     {
         try
         {
-            var remoteSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            remoteSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-            remoteSocket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
-            await remoteSocket.ConnectAsync(RemoteIp, RemotePort);
+            if (_isWorking && !IsDisposed && !_cancellationTokenSource.IsCancellationRequested)
+            {
+                var remoteSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                remoteSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                remoteSocket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+                
+                using var connectionTimeoutCts = new CancellationTokenSource(_remoteConnectTimeout);
+                try
+                {
+                    await remoteSocket.ConnectAsync(RemoteIp, RemotePort, connectionTimeoutCts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.Warn($"<Working> => Connect timeout: {RemoteIp}:{RemotePort}");
+                    localSocket.Dispose();
+                    remoteSocket.Dispose();
+                    return;
+                }
+                catch (Exception e)
+                {
+                    _logger.Error($"<Working> => Remote connect error: {e.Message}");
+                    localSocket.Dispose();
+                    remoteSocket.Dispose();
+                    return;
+                }
+                
+                var remoteEndPoint = remoteSocket.RemoteEndPoint as IPEndPoint;
+                if (remoteEndPoint == null)
+                {
+                    localSocket.Dispose();
+                    remoteSocket.Dispose();
+                    return;
+                }
+            
+                if (!_isWorking || _cancellationTokenSource.IsCancellationRequested)
+                {
+                    localSocket.Dispose();
+                    remoteSocket.Dispose();
+                    return;
+                }
 
-            if (!_isWorking && !_cancellationTokenSource.IsCancellationRequested) return;
-            int random = Random.Shared.Next();
-            WorkingThreadLocalToRemote(localSocket, remoteSocket, random);
-            WorkingThreadRemoteToLocal(localSocket, remoteSocket, random);
-        }
+                using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationTokenSource.Token);
+                int random = Random.Shared.Next();
+                var taskL2R = WorkingThreadLocalToRemote(localSocket, remoteSocket, random, connectionCts.Token);
+                var taskR2L = WorkingThreadRemoteToLocal(localSocket, remoteSocket, random, connectionCts.Token);
+                
+                await Task.WhenAny(taskL2R, taskR2L);
+                try { await connectionCts.CancelAsync(); } catch { /* Ignored */ }
+                try {
+                    await Task.WhenAll(taskL2R, taskR2L);
+                } catch { /* Ignored */ }
         
+                // Close sockets
+                try { localSocket.Shutdown(SocketShutdown.Both); } catch { }
+                try { remoteSocket.Shutdown(SocketShutdown.Both); } catch { }
+                localSocket.Dispose();
+                remoteSocket.Dispose();
+                
+                _logger.Info($"<Working> => Client disconnected from {(remoteEndPoint!).Address}");
+            }
+        }
         catch (Exception e)
         {
             _logger.Error($"<Working> => ERROR WORKING THREAD: {e.Message}");
+            _logger.Trace($"<Working> => ERROR WORKING THREAD: \n{e.StackTrace}");
         }
     }
 
-    private async void WorkingThreadLocalToRemote(Socket localSocket, Socket remoteSocket, int random = -1)
+    private async Task WorkingThreadLocalToRemote(Socket localSocket, Socket remoteSocket, int random = -1, CancellationToken token = default)
     {
+        
         byte[] buffer = _bufferPool.Rent(_bufferSize);
         try
         {
             while (_isWorking && !IsDisposed && !_cancellationTokenSource.IsCancellationRequested)
             {
-                int bytesRead = await localSocket.ReceiveAsync(buffer);
-                if (bytesRead == 0) return;
-                if (!localSocket.Connected || !remoteSocket.Connected) return;
+                int bytesRead;
                 try
                 {
-                    remoteSocket.Send(buffer, bytesRead, SocketFlags.None);
+                    bytesRead = await localSocket.ReceiveAsync(new Memory<byte>(buffer), SocketFlags.None, token).ConfigureAwait(false);
+                    if (bytesRead == 0)
+                        break;
                 }
-                catch (SocketException e)
+                catch (OperationCanceledException)
                 {
-                    return;
+                    break;
                 }
-                _trafficLogger.LogAsync(
-                    (IPEndPoint)localSocket.RemoteEndPoint!,
-                    (IPEndPoint)remoteSocket.RemoteEndPoint!,
-                    random,
-                    bytesRead,
-                    true
-                );
+                catch (Exception e)
+                {
+                    _logger.Debug($"<Working> => (LOCAL TO REMOTE) Local receive error: {e.Message}");
+                    break;
+                }
+            
+                try
+                {
+                    await remoteSocket.SendAsync(new ReadOnlyMemory<byte>(buffer, 0, bytesRead), SocketFlags.None, token).ConfigureAwait(false);
+                
+                    _trafficLogger.LogAsync(
+                        (IPEndPoint)localSocket.RemoteEndPoint!,
+                        (IPEndPoint)remoteSocket.RemoteEndPoint!,
+                        random,
+                        bytesRead,
+                        true
+                    );
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception e)
+                {
+                    _logger.Debug($"<Working> => (LOCAL TO REMOTE) Remote send error: {e.Message}");
+                    break;
+                }
             }
         }
         catch (Exception e)
         {
             _logger.Error($"<Working> => ERROR WORKING DATA THREAD (LOCAL TO REMOTE): {e.Message}");
+            _logger.Trace($"<Working> => ERROR WORKING DATA THREAD (LOCAL TO REMOTE): \n{e.StackTrace}");
         }
         finally
         {
-            remoteSocket.Dispose();
             _bufferPool.Return(buffer);
+            _logger.Debug($"<Working> => Dispose remote socket for (LOCAL TO REMOTE THREAD)");
         }
     }
     
-    private async void WorkingThreadRemoteToLocal(Socket localSocket, Socket remoteSocket, int random = -1)
+    private async Task WorkingThreadRemoteToLocal(Socket localSocket, Socket remoteSocket, int random = -1, CancellationToken token = default)
     {
         byte[] buffer = _bufferPool.Rent(_bufferSize);
         try
         {
             while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !IsDisposed)
             {
-                int bytesRead = await remoteSocket.ReceiveAsync(buffer);
-                if (bytesRead == 0) return;
-                if (!localSocket.Connected || !remoteSocket.Connected) return;
+                int bytesRead;
                 try
                 {
-                    localSocket.Send(buffer, bytesRead, SocketFlags.None);
+                    bytesRead = await remoteSocket.ReceiveAsync(new Memory<byte>(buffer), SocketFlags.None, token).ConfigureAwait(false);
+                    if (bytesRead == 0)
+                        break;
                 }
-                catch (SocketException e)
+                catch (OperationCanceledException)
                 {
-                    return;
+                    break;
                 }
-                _trafficLogger.LogAsync(
-                    (IPEndPoint)localSocket.RemoteEndPoint!,
-                    (IPEndPoint)remoteSocket.RemoteEndPoint!,
-                    random,
-                    bytesRead,
-                    false
-                );
+                catch (Exception e)
+                {
+                    _logger.Debug($"<Working> => (REMOTE TO LOCAL) Remote receive error: {e.Message}");
+                    break;
+                }
+            
+                try
+                {
+                    await localSocket.SendAsync(new ReadOnlyMemory<byte>(buffer, 0, bytesRead), SocketFlags.None, token).ConfigureAwait(false);
+                
+                    _trafficLogger.LogAsync(
+                        (IPEndPoint)localSocket.RemoteEndPoint!,
+                        (IPEndPoint)remoteSocket.RemoteEndPoint!,
+                        random,
+                        bytesRead,
+                        false
+                    );
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception e)
+                {
+                    _logger.Debug($"<Working> => (REMOTE TO LOCAL) Local send error: {e.Message}");
+                    break;
+                }
             }
         }
         catch (Exception e)
         {
             _logger.Error($"<Working> => ERROR WORKING DATA THREAD (REMOTE TO LOCAL): {e.Message}");
+            _logger.Trace($"<Working> => ERROR WORKING DATA THREAD (REMOTE TO LOCAL): \n{e.StackTrace}");
         }
         finally
         {
-            localSocket.Dispose();
             _bufferPool.Return(buffer);
+            _logger.Debug($"<Working> => Dispose local socket (REMOTE TO LOCAL THREAD)");
         }
     }
 }
