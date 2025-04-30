@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Buffers;
+using System.Net;
 using System.Net.Sockets;
 using LibraryForwarder.Core.Center.Models;
 
@@ -17,6 +18,7 @@ public class CenterServer : IDisposable
     private ITrafficLogger _trafficLogger;
     private Socket _socket;
     private bool _isWorking = false;
+    private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
     
     private Task? _mainTask = null;
     private CancellationTokenSource _cancellationToken = new CancellationTokenSource();
@@ -133,13 +135,35 @@ public class CenterServer : IDisposable
             int random = Random.Shared.Next();
             await using var stream = new NetworkStream(clientSocket, ownsSocket: false);
 
-            byte[] initStatusCode = new byte[4];
-            var byteRead = await stream.ReadAsync(initStatusCode, 0, initStatusCode.Length);
-            if (byteRead == 0 && !_cancellationToken.IsCancellationRequested) { return; }
+            byte[] initStatusCode = _bufferPool.Rent(4);
+            int bytesRead = await clientSocket.ReceiveAsync(new Memory<byte>(initStatusCode), SocketFlags.None, _cancellationToken.Token).ConfigureAwait(false);
+            ClientRequests statusCode = (ClientRequests)BitConverter.ToInt32(initStatusCode, 0);
+            
+            if (statusCode == ClientRequests.CreateService)
+            {
+                // Provider Node
+                var sessionId = _bufferPool.Rent(128);
+                Random.Shared.NextBytes(sessionId);
+                await clientSocket.SendAsync(new ReadOnlyMemory<byte>(sessionId, 0, bytesRead), SocketFlags.None, _cancellationToken.Token).ConfigureAwait(false);
+
+                throw new NotImplementedException();
+            }
+            else if (statusCode == ClientRequests.ConnectService)
+            {
+                // Visitor Node
+                throw new NotImplementedException();
+            }
+            else
+            {
+                _logger.Debug($"<Working> => Invalid status code: {statusCode}");
+                await clientSocket.DisconnectAsync(true);
+                return;
+            }
+            
             
             while (_isWorking && !_cancellationToken.IsCancellationRequested)
             {
-                
+                throw new NotImplementedException();
             }
         }
         catch (OperationCanceledException)
@@ -152,12 +176,12 @@ public class CenterServer : IDisposable
         }
         finally
         {
-            try { clientSocket.Close(); } catch { }
+            try { clientSocket.Dispose(); } catch { /* Ignored */ }
         }
     }
 
     public async void WorkingThreadNodeToNode()
     {
-        
+        throw new NotImplementedException();
     }
 }
