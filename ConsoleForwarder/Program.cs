@@ -1,5 +1,6 @@
 ﻿using System.Net;
 using LibraryForwarder.Core;
+using LibraryForwarder.Utils;
 
 namespace ConsoleForwarder;
 
@@ -7,6 +8,21 @@ internal static class Program
 {
     public static void Main(string[] args)
     {
+        if (args.Length >= 1)
+        {
+            if (args[0] == "client")
+            {
+                TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
+                benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 5000).Wait();
+                return;
+            }
+            if (args[0] == "server")
+            {
+                TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
+                benchmark.RunServerAsync(IPAddress.Parse("127.0.0.1"), 8000).Wait();
+                return;
+            }
+        }
         Console.WriteLine("Hello, World!");
         ILogger log = new SimpleLogger("APP", true);
         log.All("Hello, World!");
@@ -20,9 +36,9 @@ internal static class Program
         SimpleTrafficLogger logger = new SimpleTrafficLogger();
         TcpForwarder forwarder = new TcpForwarder(
             IPAddress.Parse("127.0.0.1"),
+            5000,
+            IPAddress.Parse("127.0.0.1"),
             8000,
-            IPAddress.Parse("103.205.253.87"),
-            34015,
             trafficLogger: logger
         );
         
