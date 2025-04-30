@@ -58,6 +58,10 @@ public class TcpForwarder : IDisposable
 
     public void Start()
     {
+        if (_isWorking)
+        {
+            return;
+        }
         lock (_threadLock)
         {
             _localSocket.Listen(100);
