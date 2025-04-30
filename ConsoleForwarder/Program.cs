@@ -8,6 +8,15 @@ internal static class Program
     public static void Main(string[] args)
     {
         Console.WriteLine("Hello, World!");
+        ILogger log = new SimpleLogger();
+        log.All("Hello, World!");
+        log.Trace("Hello, World!");
+        log.Debug("Hello, World!");
+        log.Info("Hello, World!");
+        log.Warn("Hello, World!");
+        log.Error("Hello, World!");
+        log.Fatal("Hello, World!");
+        log.Off("Hello, World!");
         SimpleTrafficLogger logger = new SimpleTrafficLogger();
         TcpForwarder forwarder = new TcpForwarder(
             IPAddress.Parse("127.0.0.1"),
