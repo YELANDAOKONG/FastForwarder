@@ -21,6 +21,7 @@ public class CenterServer
         ServerAddress = address;
         ServerPort = port;
         
+        _logger = logger ?? new SimpleLogger("Center", true);
         
         _socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);

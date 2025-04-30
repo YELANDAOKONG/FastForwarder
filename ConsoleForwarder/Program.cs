@@ -8,7 +8,7 @@ internal static class Program
     public static void Main(string[] args)
     {
         Console.WriteLine("Hello, World!");
-        ILogger log = new SimpleLogger();
+        ILogger log = new SimpleLogger("APP", true);
         log.All("Hello, World!");
         log.Trace("Hello, World!");
         log.Debug("Hello, World!");
