@@ -16,6 +16,12 @@ internal static class Program
                 benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 5000).Wait();
                 return;
             }
+            if (args[0] == "client-direct")
+            {
+                TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
+                benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 8000).Wait();
+                return;
+            }
             if (args[0] == "server")
             {
                 TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));

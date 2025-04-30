@@ -1,11 +1,12 @@
 ﻿using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using LibraryForwarder.Core;
@@ -25,7 +26,7 @@ public class TcpBenchmark : IDisposable
     // Performance metrics
     private long _totalBytesSent;
     private long _totalBytesReceived;
-    private readonly ConcurrentDictionary<long, long> _packetLatencies = new();
+    private readonly ConcurrentDictionary<ulong, long> _packetLatencies = new();
     private long _corruptedPackets;
     private long _totalPackets;
     
@@ -34,6 +35,7 @@ public class TcpBenchmark : IDisposable
     public TimeSpan TestDuration { get; set; } = TimeSpan.FromSeconds(10);
     public bool VerifyIntegrity { get; set; } = true;
     public int ParallelConnections { get; set; } = 1;
+    public bool EchoMode { get; set; } = true;  // Echo packets back for latency testing
     
     public enum TestMode
     {
@@ -141,36 +143,11 @@ public class TcpBenchmark : IDisposable
     }
 
     /// <summary>
-    /// Run test through a relay/forwarding server to measure its performance
-    /// </summary>
-    /// <param name="relayAddress">Relay server address</param>
-    /// <param name="relayPort">Relay server port</param>
-    /// <returns>Async task</returns>
-    public async Task TestRelayPerformanceAsync(IPAddress relayAddress, int relayPort)
-    {
-        _logger.Info($"Starting TCP relay benchmark through {relayAddress}:{relayPort}");
-        
-        // First start a local server to receive data 
-        var serverEndpoint = new IPEndPoint(IPAddress.Loopback, GetAvailablePort());
-        var serverTask = RunServerAsync(serverEndpoint.Address, serverEndpoint.Port);
-        
-        // Wait a moment for server to start
-        await Task.Delay(500);
-        
-        // Then run client through the relay
-        await RunClientAsync(relayAddress, relayPort);
-        
-        // Cancel the server after client completes
-        _cts?.Cancel();
-        await serverTask;
-    }
-
-    /// <summary>
     /// Handle incoming client connection
     /// </summary>
     private async Task HandleClientConnectionAsync(TcpClient client, CancellationToken ct)
     {
-        using (client)
+        try
         {
             client.NoDelay = true;
             var stream = client.GetStream();
@@ -181,34 +158,55 @@ public class TcpBenchmark : IDisposable
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, ct);
+                    int bytesRead;
+                    try
+                    {
+                        bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, ct);
+                    }
+                    catch (IOException)
+                    {
+                        // Connection was closed
+                        break;
+                    }
+                    
                     if (bytesRead == 0) break; // Connection closed
                     
                     Interlocked.Add(ref _totalBytesReceived, bytesRead);
+                    
+                    // If in echo mode, immediately send back the data for latency testing
+                    if (EchoMode && (Mode == TestMode.Latency || Mode == TestMode.Both))
+                    {
+                        try
+                        {
+                            await stream.WriteAsync(buffer, 0, bytesRead, ct);
+                            Interlocked.Add(ref _totalBytesSent, bytesRead);
+                        }
+                        catch (IOException)
+                        {
+                            // Connection was closed
+                            break;
+                        }
+                    }
                     
                     if (VerifyIntegrity)
                     {
                         VerifyPacketIntegrity(buffer, bytesRead);
                     }
-                    
-                    if (Mode == TestMode.Latency || Mode == TestMode.Both)
-                    {
-                        ProcessLatencyData(buffer, bytesRead);
-                    }
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                // Normal cancellation
-            }
-            catch (Exception ex)
-            {
-                _logger.Error($"Error handling client: {ex.Message}");
             }
             finally
             {
                 _bufferPool.Return(buffer);
+                client.Dispose();
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal cancellation
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"Error handling client: {ex.Message}");
         }
     }
 
@@ -217,49 +215,89 @@ public class TcpBenchmark : IDisposable
     /// </summary>
     private async Task RunClientConnectionAsync(IPAddress serverAddress, int port, int connectionId, CancellationToken ct)
     {
+        TcpClient? client = null;
+        NetworkStream? stream = null;
+        byte[]? buffer = null;
+        byte[]? receiveBuffer = null;
+        
         try
         {
-            using var client = new TcpClient();
+            client = new TcpClient();
             client.NoDelay = true;
             
             await client.ConnectAsync(serverAddress, port, ct);
             _logger.Debug($"Connection {connectionId} established");
             
-            var stream = client.GetStream();
+            stream = client.GetStream();
+            
+            // Rent buffers from pool
+            buffer = _bufferPool.Rent(BufferSize);
+            receiveBuffer = _bufferPool.Rent(BufferSize);
+            
+            ulong packetId = 0;
             var stopwatch = Stopwatch.StartNew();
             
-            // Rent buffer from pool
-            byte[] buffer = _bufferPool.Rent(BufferSize);
-            try
+            // For latency testing, we need to setup receive task
+            Task<int>? receiveTask = null;
+            if (Mode == TestMode.Latency || Mode == TestMode.Both)
             {
-                long packetId = 0;
-                while (!ct.IsCancellationRequested)
+                receiveTask = stream.ReadAsync(receiveBuffer, 0, receiveBuffer.Length, ct);
+            }
+            
+            while (!ct.IsCancellationRequested)
+            {
+                // Generate test data
+                int dataSize = GenerateTestData(buffer, packetId);
+                
+                // Record send timestamp
+                long sendTimestamp = Stopwatch.GetTimestamp();
+                
+                // Send data
+                await stream.WriteAsync(buffer, 0, dataSize, ct);
+                Interlocked.Add(ref _totalBytesSent, dataSize);
+                Interlocked.Increment(ref _totalPackets);
+                
+                // Store current packet ID for latency tracking
+                ulong currentPacketId = packetId++;
+                
+                // For latency testing - receive echo response
+                if (Mode == TestMode.Latency || Mode == TestMode.Both)
                 {
-                    // Generate test data
-                    int dataSize = GenerateTestData(buffer, packetId++);
-                    
-                    // Send data
-                    var sendTime = stopwatch.ElapsedMilliseconds;
-                    await stream.WriteAsync(buffer, 0, dataSize, ct);
-                    Interlocked.Add(ref _totalBytesSent, dataSize);
-                    Interlocked.Increment(ref _totalPackets);
-                    
-                    // Store send time for latency calculation if needed
-                    if (Mode == TestMode.Latency || Mode == TestMode.Both)
+                    if (receiveTask != null)
                     {
-                        _packetLatencies[packetId] = sendTime;
+                        int bytesRead = await receiveTask;
+                        Interlocked.Add(ref _totalBytesReceived, bytesRead);
+                        
+                        if (bytesRead > 0)
+                        {
+                            // Calculate latency
+                            long receiveTimestamp = Stopwatch.GetTimestamp();
+                            double latencyMs = (receiveTimestamp - sendTimestamp) * 1000.0 / Stopwatch.Frequency;
+                            
+                            // Store latency for this packet
+                            _packetLatencies[currentPacketId] = (long)latencyMs;
+                            
+                            // Verify the echo packet if needed
+                            if (VerifyIntegrity && bytesRead >= 16)
+                            {
+                                VerifyPacketIntegrity(receiveBuffer, bytesRead);
+                            }
+                            
+                            // Start next receive
+                            receiveTask = stream.ReadAsync(receiveBuffer, 0, receiveBuffer.Length, ct);
+                        }
                     }
                     
-                    // Small delay to avoid overwhelming the network
+                    // Add slight delay to avoid overwhelming the network in latency mode
                     if (Mode == TestMode.Latency)
                     {
                         await Task.Delay(10, ct);
                     }
                 }
-            }
-            finally
-            {
-                _bufferPool.Return(buffer);
+                else if (Mode == TestMode.Throughput) 
+                {
+                    // In throughput-only mode, send as fast as possible
+                }
             }
         }
         catch (OperationCanceledException)
@@ -270,25 +308,32 @@ public class TcpBenchmark : IDisposable
         {
             _logger.Error($"Connection {connectionId} error: {ex.Message}");
         }
+        finally
+        {
+            if (buffer != null) _bufferPool.Return(buffer);
+            if (receiveBuffer != null) _bufferPool.Return(receiveBuffer);
+            stream?.Dispose();
+            client?.Dispose();
+        }
     }
 
     /// <summary>
     /// Generate test data with integrity verification if enabled
     /// </summary>
-    private int GenerateTestData(byte[] buffer, long packetId)
+    private int GenerateTestData(byte[] buffer, ulong packetId)
     {
         int dataSize = BufferSize;
         
         // Write packet header (packet ID and timestamp)
         BitConverter.TryWriteBytes(buffer, packetId);
-        BitConverter.TryWriteBytes(buffer.AsSpan(8), DateTime.UtcNow.Ticks);
+        BitConverter.TryWriteBytes(buffer.AsSpan(8), Stopwatch.GetTimestamp());
         
         if (VerifyIntegrity)
         {
             // Fill the rest with deterministic but unique data 
             for (int i = 16; i < dataSize - 32; i++)
             {
-                buffer[i] = (byte)((i + packetId) % 256);
+                buffer[i] = (byte)((i + (int)(packetId % int.MaxValue)) % 256);
             }
             
             // Add checksum at the end
@@ -316,51 +361,46 @@ public class TcpBenchmark : IDisposable
         if (bytesRead < 48) return; // Too small for proper verification
         
         // Get packet ID
-        long packetId = BitConverter.ToInt64(buffer, 0);
+        ulong packetId = BitConverter.ToUInt64(buffer, 0);
         
         // Verify checksum
         using var sha = SHA256.Create();
         var computedHash = sha.ComputeHash(buffer, 0, bytesRead - 32);
         
+        bool hashValid = true;
         for (int i = 0; i < 32; i++)
         {
             if (computedHash[i] != buffer[bytesRead - 32 + i])
             {
-                Interlocked.Increment(ref _corruptedPackets);
-                _logger.Warn($"Packet {packetId} integrity check failed");
-                return;
+                hashValid = false;
+                break;
             }
+        }
+        
+        if (!hashValid)
+        {
+            Interlocked.Increment(ref _corruptedPackets);
+            _logger.Warn($"Packet {packetId} integrity check failed");
+            return;
         }
         
         // Verify data pattern
+        bool patternValid = true;
         for (int i = 16; i < bytesRead - 32; i++)
         {
-            if (buffer[i] != (byte)((i + packetId) % 256))
+            byte expected = (byte)((i + (int)(packetId % int.MaxValue)) % 256);
+            if (buffer[i] != expected)
             {
-                Interlocked.Increment(ref _corruptedPackets);
-                _logger.Warn($"Packet {packetId} data pattern check failed at offset {i}");
-                return;
+                patternValid = false;
+                break;
             }
         }
-    }
-
-    /// <summary>
-    /// Process latency data from received packets
-    /// </summary>
-    private void ProcessLatencyData(byte[] buffer, int bytesRead)
-    {
-        if (bytesRead < 16) return;
         
-        // Get packet ID and timestamp
-        long packetId = BitConverter.ToInt64(buffer, 0);
-        long sendTimeTicks = BitConverter.ToInt64(buffer, 8);
-        
-        // Calculate latency
-        long currentTicks = DateTime.UtcNow.Ticks;
-        long latencyTicks = currentTicks - sendTimeTicks;
-        long latencyMs = latencyTicks / TimeSpan.TicksPerMillisecond;
-        
-        _packetLatencies[packetId] = latencyMs;
+        if (!patternValid)
+        {
+            Interlocked.Increment(ref _corruptedPackets);
+            _logger.Warn($"Packet {packetId} data pattern check failed");
+        }
     }
 
     /// <summary>
@@ -374,8 +414,8 @@ public class TcpBenchmark : IDisposable
         
         // Calculate throughput
         double durationSeconds = TestDuration.TotalSeconds;
-        double sendMbps = _totalBytesSent * 8.0 / (1024 * 1024 * durationSeconds);
-        double receiveMbps = _totalBytesReceived * 8.0 / (1024 * 1024 * durationSeconds);
+        double sendMbps = _totalBytesSent * 8.0 / (1024 * 1024 * Math.Max(1, durationSeconds));
+        double receiveMbps = _totalBytesReceived * 8.0 / (1024 * 1024 * Math.Max(1, durationSeconds));
         
         _logger.Info($"Test duration: {durationSeconds:F2} seconds");
         _logger.Info($"Total data sent: {FormatByteSize(_totalBytesSent)}");
@@ -402,10 +442,19 @@ public class TcpBenchmark : IDisposable
                 double avgLatency = latencies.Average();
                 double minLatency = latencies.Min();
                 double maxLatency = latencies.Max();
-                double p95Latency = CalculatePercentile(latencies, 95);
-                double p99Latency = CalculatePercentile(latencies, 99);
                 
-                _logger.Info($"Latency (ms): Min={minLatency:F2}, Avg={avgLatency:F2}, Max={maxLatency:F2}, p95={p95Latency:F2}, p99={p99Latency:F2}");
+                // Calculate percentiles only if we have enough samples
+                double p95Latency = latencies.Count >= 20 ? CalculatePercentile(latencies, 95) : 0;
+                double p99Latency = latencies.Count >= 100 ? CalculatePercentile(latencies, 99) : 0;
+                
+                _logger.Info($"Latency measurements: {latencies.Count} packets");
+                _logger.Info($"Latency (ms): Min={minLatency:F2}, Avg={avgLatency:F2}, Max={maxLatency:F2}" +
+                            (latencies.Count >= 20 ? $", p95={p95Latency:F2}" : "") +
+                            (latencies.Count >= 100 ? $", p99={p99Latency:F2}" : ""));
+            }
+            else
+            {
+                _logger.Warn("No latency measurements collected. Make sure EchoMode is enabled on server side.");
             }
         }
         
@@ -417,9 +466,11 @@ public class TcpBenchmark : IDisposable
     /// </summary>
     private double CalculatePercentile(List<long> values, int percentile)
     {
+        if (values.Count == 0) return 0;
+        
         var sortedValues = values.OrderBy(v => v).ToList();
         int index = (int)Math.Ceiling((percentile / 100.0) * sortedValues.Count) - 1;
-        return sortedValues[Math.Max(0, index)];
+        return sortedValues[Math.Max(0, Math.Min(index, sortedValues.Count - 1))];
     }
 
     /// <summary>
@@ -439,6 +490,8 @@ public class TcpBenchmark : IDisposable
     /// </summary>
     private string FormatByteSize(long bytes)
     {
+        if (bytes == 0) return "0.00 B (0 bytes)";
+        
         string[] sizes = { "B", "KB", "MB", "GB", "TB" };
         double len = bytes;
         int order = 0;
@@ -460,6 +513,31 @@ public class TcpBenchmark : IDisposable
         using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         return ((IPEndPoint)socket.LocalEndPoint!).Port;
+    }
+
+    /// <summary>
+    /// Run test through a relay/forwarding server to measure its performance
+    /// </summary>
+    /// <param name="relayAddress">Relay server address</param>
+    /// <param name="relayPort">Relay server port</param>
+    /// <returns>Async task</returns>
+    public async Task TestRelayPerformanceAsync(IPAddress relayAddress, int relayPort)
+    {
+        _logger.Info($"Starting TCP relay benchmark through {relayAddress}:{relayPort}");
+        
+        // First start a local server to receive data 
+        var serverEndpoint = new IPEndPoint(IPAddress.Loopback, GetAvailablePort());
+        var serverTask = RunServerAsync(serverEndpoint.Address, serverEndpoint.Port);
+        
+        // Wait a moment for server to start
+        await Task.Delay(500);
+        
+        // Then run client through the relay
+        await RunClientAsync(relayAddress, relayPort);
+        
+        // Cancel the server after client completes
+        _cts?.Cancel();
+        await serverTask;
     }
 
     /// <summary>
@@ -495,5 +573,6 @@ public class TcpBenchmark : IDisposable
         _logger.Info("  -P <num>         Number of parallel connections (default: 1)");
         _logger.Info("  -i <0|1>         Verify data integrity (default: 1)");
         _logger.Info("  -m <t|l|b>       Mode: throughput, latency, or both (default: both)");
+        _logger.Info("  -e <0|1>         Echo mode for latency testing (default: 1)");
     }
 }
