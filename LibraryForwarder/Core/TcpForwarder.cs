@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Buffers;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
@@ -17,11 +18,23 @@ public class TcpForwarder : IDisposable
     private Task? _mainThread;
     private List<Task> _workingThreads;
     private readonly object _threadLock = new();
-
+    
+    
+    private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
+    private readonly int _bufferSize;
+    
     private bool _isDisposed = false;
     private ITrafficLogger _trafficLogger;
     
-    public TcpForwarder(IPAddress localIp, int localPort, IPAddress remoteIp, int remotePort, ITrafficLogger? trafficLogger = null)
+    
+    public TcpForwarder(
+        IPAddress localIp, 
+        int localPort, 
+        IPAddress remoteIp,
+        int remotePort, 
+        ITrafficLogger? trafficLogger = null,
+        int bufferSize = 8192
+    )
     {
         LocalIp = localIp;
         LocalPort = localPort;
@@ -30,6 +43,8 @@ public class TcpForwarder : IDisposable
 
         _localSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         _localSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        _localSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+        _localSocket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
         _localSocket.Bind(new IPEndPoint(LocalIp, LocalPort));
         _remoteSockets = new List<Socket>();
 
@@ -38,6 +53,7 @@ public class TcpForwarder : IDisposable
         _workingThreads = new List<Task>();
         
         _trafficLogger = trafficLogger ?? new SimpleTrafficLogger();
+        _bufferSize = bufferSize;
     }
 
     public void Start()
@@ -120,6 +136,8 @@ public class TcpForwarder : IDisposable
         try
         {
             var remoteSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            remoteSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            remoteSocket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
             remoteSocket.Connect(RemoteIp, RemotePort);
             lock (_threadLock)
             {
@@ -148,41 +166,55 @@ public class TcpForwarder : IDisposable
 
     private void WorkingThreadLocalToRemote(Socket localSocket, Socket remoteSocket, int random = -1)
     {
-        while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
+        byte[] buffer = _bufferPool.Rent(_bufferSize);
+        try
         {
-            byte[] bufferL2R = new byte[8192];
-            int bytesReadL2R = localSocket.Receive(bufferL2R);
-            if (bytesReadL2R > 0)
+            while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
             {
-                remoteSocket.Send(bufferL2R, bytesReadL2R, SocketFlags.None);
-                _trafficLogger.LogAsync(
-                    (IPEndPoint) localSocket.RemoteEndPoint!,
-                    (IPEndPoint) remoteSocket.RemoteEndPoint!,
-                    random,
-                    bytesReadL2R,
-                    true
-                );
+                int bytesRead = localSocket.Receive(buffer);
+                if (bytesRead > 0)
+                {
+                    remoteSocket.Send(buffer, bytesRead, SocketFlags.None);
+                    _trafficLogger.LogAsync(
+                        (IPEndPoint)localSocket.RemoteEndPoint!,
+                        (IPEndPoint)remoteSocket.RemoteEndPoint!,
+                        random,
+                        bytesRead,
+                        true
+                    );
+                }
             }
+        }
+        finally
+        {
+            _bufferPool.Return(buffer);
         }
     }
     
     private void WorkingThreadRemoteToLocal(Socket localSocket, Socket remoteSocket, int random = -1)
     {
-        while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
+        byte[] buffer = _bufferPool.Rent(_bufferSize);
+        try
         {
-            byte[] bufferR2L = new byte[8192];
-            int bytesReadR2L = remoteSocket.Receive(bufferR2L);
-            if (bytesReadR2L > 0)
+            while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
             {
-                localSocket.Send(bufferR2L, bytesReadR2L, SocketFlags.None);
-                _trafficLogger.LogAsync(
-                    (IPEndPoint) localSocket.RemoteEndPoint!,
-                    (IPEndPoint) remoteSocket.RemoteEndPoint!,
-                    random,
-                    bytesReadR2L,
-                    false
-                );
+                int bytesRead = remoteSocket.Receive(buffer);
+                if (bytesRead > 0)
+                {
+                    localSocket.Send(buffer, bytesRead, SocketFlags.None);
+                    _trafficLogger.LogAsync(
+                        (IPEndPoint)localSocket.RemoteEndPoint!,
+                        (IPEndPoint)remoteSocket.RemoteEndPoint!,
+                        random,
+                        bytesRead,
+                        false
+                    );
+                }
             }
+        }
+        finally
+        {
+            _bufferPool.Return(buffer);
         }
     }
     
