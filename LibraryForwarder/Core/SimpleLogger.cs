@@ -50,12 +50,15 @@ public class SimpleLogger : ILogger
         builder.Append($"[{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}]");
         builder.Append(' ');
         // Level
-        builder.Append($"({level})");
+        builder.Append($"[{level}]");
+        builder.Append(' ');
+        // Title
+        builder.Append($"({Title})");
         builder.Append(' ');
         // Messages
         foreach (string message in messages)
         {
-            builder.Append($"{message}[]");
+            builder.Append($"{message}");
             builder.Append(' ');
         }
 
@@ -72,7 +75,10 @@ public class SimpleLogger : ILogger
         builder.Append($"[grey][[{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}]][/]");
         builder.Append(' ');
         // Level
-        builder.Append($"[{levelColor}]({Markup.Escape(level)})[/]");
+        builder.Append($"[{levelColor}][[{Markup.Escape(level)}]][/]");
+        builder.Append(' ');
+        // Title
+        builder.Append($"[{messageColor}]({Markup.Escape(Title)})[/]");
         builder.Append(' ');
         // Messages
         foreach (string message in messages)
