@@ -6,10 +6,10 @@ namespace LibraryForwarder.Core;
 
 public class TcpForwarder : IDisposable
 {
-    public IPAddress LocalIp { get; set; }
-    public int LocalPort { get; set; }
-    public IPAddress RemoteIp { get; set; }
-    public int RemotePort { get; set; }
+    public IPAddress LocalIp { get; }
+    public int LocalPort { get; }
+    public IPAddress RemoteIp { get; }
+    public int RemotePort { get; }
 
     private Socket _localSocket;
     private List<Socket> _remoteSockets;
@@ -19,8 +19,9 @@ public class TcpForwarder : IDisposable
     private readonly object _threadLock = new();
 
     private bool _isDisposed = false;
+    private ITrafficLogger _trafficLogger;
     
-    public TcpForwarder(IPAddress localIp, int localPort, IPAddress remoteIp, int remotePort)
+    public TcpForwarder(IPAddress localIp, int localPort, IPAddress remoteIp, int remotePort, ITrafficLogger? trafficLogger = null)
     {
         LocalIp = localIp;
         LocalPort = localPort;
@@ -35,6 +36,8 @@ public class TcpForwarder : IDisposable
         _isWorking = false;
         _mainThread = null;
         _workingThreads = new List<Task>();
+        
+        _trafficLogger = trafficLogger ?? new SimpleTrafficLogger();
     }
 
     public void Start()
@@ -85,6 +88,11 @@ public class TcpForwarder : IDisposable
     {
         return _isDisposed;
     }
+    
+    public ITrafficLogger GetTrafficLogger()
+    {
+        return _trafficLogger;
+    }
 
     private void MainThread()
     {
@@ -120,8 +128,9 @@ public class TcpForwarder : IDisposable
 
             if (_isWorking)
             {
-                var local2RemoteTask = Task.Run(() => WorkingThreadLocalToRemote(localSocket, remoteSocket));
-                var remote2LocalTask = Task.Run(() => WorkingThreadRemoteToLocal(localSocket, remoteSocket));
+                int random = Random.Shared.Next();
+                var local2RemoteTask = Task.Run(() => WorkingThreadLocalToRemote(localSocket, remoteSocket, random));
+                var remote2LocalTask = Task.Run(() => WorkingThreadRemoteToLocal(localSocket, remoteSocket, random));
                 
                 lock (_threadLock)
                 {
@@ -137,7 +146,7 @@ public class TcpForwarder : IDisposable
         }
     }
 
-    private void WorkingThreadLocalToRemote(Socket localSocket, Socket remoteSocket)
+    private void WorkingThreadLocalToRemote(Socket localSocket, Socket remoteSocket, int random = -1)
     {
         while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
         {
@@ -146,12 +155,18 @@ public class TcpForwarder : IDisposable
             if (bytesReadL2R > 0)
             {
                 remoteSocket.Send(bufferL2R, bytesReadL2R, SocketFlags.None);
-                Console.WriteLine($"[DATA] ({localSocket.AddressFamily} -> {remoteSocket.AddressFamily}): {bufferL2R.Length}");
+                _trafficLogger.LogAsync(
+                    (IPEndPoint) localSocket.RemoteEndPoint!,
+                    (IPEndPoint) remoteSocket.RemoteEndPoint!,
+                    random,
+                    bytesReadL2R,
+                    true
+                );
             }
         }
     }
     
-    private void WorkingThreadRemoteToLocal(Socket localSocket, Socket remoteSocket)
+    private void WorkingThreadRemoteToLocal(Socket localSocket, Socket remoteSocket, int random = -1)
     {
         while (_isWorking && localSocket.Connected && remoteSocket.Connected && _isWorking && !_isDisposed)
         {
@@ -160,7 +175,13 @@ public class TcpForwarder : IDisposable
             if (bytesReadR2L > 0)
             {
                 localSocket.Send(bufferR2L, bytesReadR2L, SocketFlags.None);
-                Console.WriteLine($"[DATA] ({remoteSocket.AddressFamily} -> {localSocket.AddressFamily}): {bufferR2L.Length}");
+                _trafficLogger.LogAsync(
+                    (IPEndPoint) localSocket.RemoteEndPoint!,
+                    (IPEndPoint) remoteSocket.RemoteEndPoint!,
+                    random,
+                    bytesReadR2L,
+                    false
+                );
             }
         }
     }
