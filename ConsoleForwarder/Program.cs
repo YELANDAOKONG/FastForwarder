@@ -10,6 +10,39 @@ internal static class Program
     {
         if (args.Length >= 1)
         {
+            if (args[0] == "mc-hex")
+            {
+                SimpleLogger mLogger = new SimpleLogger("TCP");
+                SimpleTrafficLogger mTLogger = new SimpleTrafficLogger();
+                SimpleTcpMiddleman mTcpMiddleman = new SimpleTcpMiddleman(new SimpleLogger("TCPM", true));
+                TcpMiddleman middleman = new TcpMiddleman(
+                    IPAddress.Parse("127.0.0.1"),
+                    8000,
+                    IPAddress.Parse("103.205.253.87"),
+                    34015,
+                    mTLogger,
+                    mLogger,
+                    mTcpMiddleman
+                );
+                middleman.Start();
+                while (!middleman.IsDisposed)
+                {
+                    Console.ReadLine();
+                    mTLogger.TrafficLock.EnterReadLock();
+                    foreach (var traffic in mTLogger.Traffic)
+                    {
+                        Console.WriteLine($"[TRAFFIC] ({traffic.Key.from}) <=> ({traffic.Key.to}) [{traffic.Key.random}]: {traffic.Value.fromRemote} <-> {traffic.Value.toRemote}");
+                    }
+                    mTLogger.TrafficLock.ExitReadLock();
+                }
+                middleman.Wait();
+                return;
+            }
+        }
+
+
+        if (args.Length >= 1)
+        {
             bool checksum = false;
             bool echo = false;
             int threads = 4;
