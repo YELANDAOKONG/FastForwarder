@@ -24,7 +24,7 @@ internal static class Program
             logger.TrafficLock.EnterReadLock();
             foreach (var traffic in logger.Traffic)
             {
-                Console.WriteLine($"[TRAFFIC] ({traffic.Key.from}) <=> ({traffic.Key.to}) [{traffic.Key.random}]: {traffic.Value.Item1} <-> {traffic.Value.Item2}");
+                Console.WriteLine($"[TRAFFIC] ({traffic.Key.from}) <=> ({traffic.Key.to}) [{traffic.Key.random}]: {traffic.Value.fromRemote} <-> {traffic.Value.toRemote}");
             }
             logger.TrafficLock.ExitReadLock();
         }

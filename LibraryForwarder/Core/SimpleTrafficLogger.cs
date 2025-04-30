@@ -5,7 +5,7 @@ namespace LibraryForwarder.Core;
 public class SimpleTrafficLogger : ITrafficLogger
 {
     
-    public readonly Dictionary<(IPEndPoint from, IPEndPoint to, int random), (int, int)> Traffic = new();
+    public readonly Dictionary<(IPEndPoint from, IPEndPoint to, int random), (int fromRemote, int toRemote)> Traffic = new();
     public readonly ReaderWriterLockSlim TrafficLock = new();
     
     public SimpleTrafficLogger()
