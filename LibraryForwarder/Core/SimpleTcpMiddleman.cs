@@ -7,16 +7,23 @@ public class SimpleTcpMiddleman : ITcpMiddleman
 {
     
     private ILogger _logger = new SimpleLogger("STM", true);
+    private ITcpMiddleman? _middleman = null;
 
     public SimpleTcpMiddleman(){}
 
-    public SimpleTcpMiddleman(ILogger logger)
+    public SimpleTcpMiddleman(ILogger logger, ITcpMiddleman? middleman = null)
     {
         _logger = logger;
+        _middleman = middleman;
     }
     
     public byte[] Data(IPEndPoint from, IPEndPoint to, int random, int counter, bool isToRemote, byte[] data)
     {
+        if (_middleman != null) 
+        {
+            data = _middleman.Data(from, to, random, counter, isToRemote, data);
+        }
+        
         StringBuilder builder = new();
         builder.Append("<Packet>");
         builder.Append('\n');

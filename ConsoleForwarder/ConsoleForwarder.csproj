@@ -11,4 +11,12 @@
       <ProjectReference Include="..\LibraryForwarder\LibraryForwarder.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Folder Include="Utils\" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="xunit" Version="2.9.3" />
+    </ItemGroup>
+
 </Project>
