@@ -5,7 +5,7 @@ namespace LibraryForwarder.Core;
 public class SimpleTrafficLogger : ITrafficLogger
 {
     
-    public readonly Dictionary<(IPEndPoint from, IPEndPoint to, int random), (int fromRemote, int toRemote)> Traffic = new();
+    public readonly Dictionary<(IPEndPoint from, IPEndPoint to, int random), (long fromRemote, long toRemote)> Traffic = new();
     public readonly ReaderWriterLockSlim TrafficLock = new();
     
     public SimpleTrafficLogger()
@@ -13,7 +13,7 @@ public class SimpleTrafficLogger : ITrafficLogger
         
     }
 
-    public void Log(IPEndPoint from, IPEndPoint to, int random, int bytes, bool isToRemote)
+    public void Log(IPEndPoint from, IPEndPoint to, int random, long bytes, bool isToRemote)
     {
         TrafficLock.EnterWriteLock();
         if (!Traffic.ContainsKey((from, to, random)))
@@ -31,15 +31,15 @@ public class SimpleTrafficLogger : ITrafficLogger
         TrafficLock.ExitWriteLock();
     }
 
-    public Task LogAsync(IPEndPoint from, IPEndPoint to, int random, int bytes, bool isToRemote)
+    public Task LogAsync(IPEndPoint from, IPEndPoint to, int random, long bytes, bool isToRemote)
     {
         return Task.Run(() => Log(from, to, random, bytes, isToRemote));
     }
 
-    public (int from, int to) Queue(IPEndPoint from, IPEndPoint to, int random)
+    public (long from, long to) Queue(IPEndPoint from, IPEndPoint to, int random)
     {
         TrafficLock.EnterReadLock();
-        var data = (0, 0);
+        var data = (0L, 0L);
         if (Traffic.ContainsKey((from, to, random)))
         {
             data = Traffic[(from, to, random)];
