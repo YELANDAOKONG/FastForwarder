@@ -10,14 +10,16 @@ internal static class Program
     {
         if (args.Length >= 1)
         {
-            bool checksum = true;
-            int threads = 8;
+            bool checksum = false;
+            bool echo = false;
+            int threads = 4;
             if (args[0] == "client")
             {
                 TcpBenchmark benchmark = new TcpBenchmark(new SimpleLogger("TBC", true));
                 benchmark.VerifyIntegrity = checksum;
                 benchmark.ParallelConnections = threads;
                 benchmark.BufferSize = 256 * 1024;
+                benchmark.EchoMode = echo; 
                 benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 5000).Wait();
                 return;
             }
@@ -27,6 +29,7 @@ internal static class Program
                 benchmark.VerifyIntegrity = checksum;
                 benchmark.ParallelConnections = threads;
                 benchmark.BufferSize = 256 * 1024;
+                benchmark.EchoMode = echo; 
                 benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 9000).Wait();
                 return;
             }
@@ -36,6 +39,7 @@ internal static class Program
                 benchmark.VerifyIntegrity = checksum;
                 benchmark.ParallelConnections = threads;
                 benchmark.BufferSize = 256 * 1024;
+                benchmark.EchoMode = echo; 
                 benchmark.RunClientAsync(IPAddress.Parse("127.0.0.1"), 8000).Wait();
                 return;
             }
@@ -45,6 +49,7 @@ internal static class Program
                 benchmark.VerifyIntegrity = checksum;
                 benchmark.ParallelConnections = threads;
                 benchmark.BufferSize = 256 * 1024;
+                benchmark.EchoMode = echo; 
                 benchmark.RunServerAsync(IPAddress.Parse("127.0.0.1"), 8000).Wait();
                 return;
             }
