@@ -2,6 +2,7 @@
 using ConsoleForwarder.Tools;
 using System;
 using System.IO;
+using System.Text;
 using Xunit;
 
 namespace ConsoleForwarder.Tools.Tests;
@@ -18,6 +19,7 @@ public class VarIntTests
     [InlineData(int.MaxValue)]
     [InlineData(-1)]
     [InlineData(int.MinValue)]
+    [InlineData(0x0FFFFFFF)]
     public void RoundTrip_ShouldMatchOriginalValue(int value)
     {
         // Arrange
@@ -50,5 +52,20 @@ public class VarIntTests
         
         // Act & Assert
         Assert.Throws<ArgumentException>(() => VarInt.Write(buffer, 2147483647));
+    }
+    
+    [Theory]
+    [InlineData(127, new byte[] { 0x7F })]
+    [InlineData(16383, new byte[] { 0xFF, 0x7F })]
+    [InlineData(2097151, new byte[] { 0xFF, 0xFF, 0x7F })]
+    [InlineData(268435455, new byte[] { 0xFF, 0xFF, 0xFF, 0x7F })]
+    public void SpecificValues_ShouldDecodeCorrectly(int expected, byte[] data)
+    {
+        // Act
+        var result = VarInt.Read(data, out var consumed);
+    
+        // Assert
+        Assert.Equal(expected, result);
+        Assert.Equal(data.Length, consumed);
     }
 }

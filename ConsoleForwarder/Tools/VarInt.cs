@@ -1,7 +1,7 @@
-﻿// VarInt.cs
-using System;
+﻿using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.IO;
 using System.IO.Pipelines;
 using System.Text;
 
@@ -28,7 +28,7 @@ public static class VarInt
 
     public static async ValueTask<int> ReadAsync(PipeReader reader)
     {
-        int result = 0;
+        uint result = 0;
         int shift = 0;
         int bytesRead = 0;
 
@@ -43,7 +43,7 @@ public static class VarInt
                 buffer = buffer.Slice(1);
                 bytesRead++;
 
-                result |= (b & 0x7F) << shift;
+                result |= (uint)(b & 0x7F) << shift;
                 shift += 7;
 
                 if (bytesRead > 5)
@@ -55,9 +55,7 @@ public static class VarInt
                 if ((b & 0x80) == 0)
                 {
                     reader.AdvanceTo(buffer.Start);
-                    if (bytesRead == 5 && shift > 32)
-                        return (int)((uint)result | 0xFFFF_FF00);
-                    return result;
+                    return (int)result;
                 }
             }
 
@@ -83,32 +81,27 @@ public static class VarInt
 
         return bytesWritten;
     }
-
+    
     public static int Read(ReadOnlySpan<byte> buffer, out int bytesConsumed)
     {
-        int result = 0;
+        uint result = 0;
         int shift = 0;
         bytesConsumed = 0;
 
-        while (true)
+        while (bytesConsumed < buffer.Length)
         {
-            if (bytesConsumed >= buffer.Length)
-                throw new ArgumentException("Incomplete VarInt");
-
             byte b = buffer[bytesConsumed++];
-            result |= (b & 0x7F) << shift;
+            result |= (uint)(b & 0x7F) << shift;
             shift += 7;
 
             if (bytesConsumed > 5)
                 throw new InvalidDataException("VarInt exceeds 5 bytes");
 
             if ((b & 0x80) == 0)
-            {
-                if (bytesConsumed == 5 && shift > 32)
-                    return (int)((uint)result | 0xFFFF_FF00);
-                return result;
-            }
+                return (int)result;
         }
+
+        throw new ArgumentException("Incomplete VarInt");
     }
 
     public static byte[] ToBytes(int value)

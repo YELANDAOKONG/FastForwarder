@@ -1,5 +1,9 @@
-﻿using System.Buffers;
+﻿using System;
+using System.Buffers;
+using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace ConsoleForwarder.Tools;
 
@@ -10,7 +14,8 @@ public static class StreamVarString
     public static void Write(Stream stream, string value)
     {
         byte[] lengthBuffer = new byte[5];
-        int lengthBytes = VarInt.Write(lengthBuffer.AsSpan(), value.Length);
+        int byteCount = Encoding.UTF8.GetByteCount(value);
+        int lengthBytes = VarInt.Write(lengthBuffer.AsSpan(), byteCount);
         stream.Write(lengthBuffer, 0, lengthBytes);
         byte[] strBytes = Encoding.UTF8.GetBytes(value);
         stream.Write(strBytes, 0, strBytes.Length);
@@ -20,9 +25,9 @@ public static class StreamVarString
         CancellationToken cancellationToken = default)
     {
         byte[] lengthBuffer = new byte[5];
-        int lengthBytes = VarInt.Write(lengthBuffer.AsSpan(), value.Length);
-        await stream.WriteAsync(lengthBuffer.AsMemory(0, lengthBytes), cancellationToken);
         int byteCount = Encoding.UTF8.GetByteCount(value);
+        int lengthBytes = VarInt.Write(lengthBuffer.AsSpan(), byteCount);
+        await stream.WriteAsync(lengthBuffer.AsMemory(0, lengthBytes), cancellationToken);
         byte[] buffer = ArrayPool<byte>.Shared.Rent(byteCount);
         try
         {
@@ -34,7 +39,7 @@ public static class StreamVarString
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
-
+    
     public static string Read(Stream stream, int maxLength = MaxAllowedLength)
     {
         int length = StreamVarInt.Read(stream);
@@ -46,7 +51,10 @@ public static class StreamVarString
             while (totalRead < length)
             {
                 int read = stream.Read(buffer, totalRead, length - totalRead);
-                if (read == 0) throw new EndOfStreamException();
+                if (read == 0)
+                {
+                    throw new EndOfStreamException($"Unexpected end of stream. Expected: {length}, Read: {totalRead}");
+                }
                 totalRead += read;
             }
             return Encoding.UTF8.GetString(buffer, 0, length);
@@ -57,6 +65,7 @@ public static class StreamVarString
         }
     }
 
+    
     public static async ValueTask<string> ReadAsync(Stream stream, 
         int maxLength = MaxAllowedLength,
         byte[]? reusableBuffer = null,
@@ -66,17 +75,32 @@ public static class StreamVarString
         ValidateLength(length, maxLength);
         byte[] buffer = reusableBuffer != null && reusableBuffer.Length >= length 
             ? reusableBuffer 
-            : new byte[length];
+            : ArrayPool<byte>.Shared.Rent(length);
         
-        int totalRead = 0;
-        while (totalRead < length)
+        try 
         {
-            int read = await stream.ReadAsync(buffer.AsMemory(totalRead, length - totalRead), cancellationToken);
-            if (read == 0) throw new EndOfStreamException();
-            totalRead += read;
+            int totalRead = 0;
+            while (totalRead < length)
+            {
+                int read = await stream.ReadAsync(buffer.AsMemory(totalRead, length - totalRead), cancellationToken);
+                if (read == 0)
+                {
+                    throw new EndOfStreamException($"Unexpected end of stream. Expected: {length}, Read: {totalRead}");
+                }
+                totalRead += read;
+            }
+            
+            return Encoding.UTF8.GetString(buffer, 0, length);
         }
-        return Encoding.UTF8.GetString(buffer, 0, length);
+        finally 
+        {
+            if (reusableBuffer == null || reusableBuffer.Length < length)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
     }
+
     
     private static void ValidateLength(int length, int maxLength)
     {
