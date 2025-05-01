@@ -2,9 +2,9 @@
 
 namespace LibraryForwarder.Core.Center.Models;
 
-public record NodeGroup
+public class NodeGroup
 {
-    public byte[] SessionId = [];
-    public required Socket Provider;
-    public List<Socket> Visitors = new();
+    public required byte[] SessionId { get; set; }
+    public required Socket Provider { get; set; }
+    public List<Socket> Visitors { get; } = new();
 }
